@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+.cache/
+models/
+.env
+.env.*
+*.karaoke
+*.mp3
+*.wav
+*.m4a
+*.ogg
+*.mp4
+*.webm
+work/
+outputs/
+.openai/
