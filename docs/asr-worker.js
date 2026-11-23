@@ -1,11 +1,16 @@
-import {extractEmissions} from './acoustics.js';
-import {ACOUSTIC_MODEL,buildTarget,forceAlign,lineWindows,timelineFromAlignment} from './ctc-align.js';
+import {extractEmissions,vocalBoundaries} from './acoustics.js?v=5';
+import {roughTiming} from './engine.js?v=5';
+import {ACOUSTIC_MODEL,buildTarget,forceAlign,lineWindows,timelineFromAlignment} from './ctc-align.js?v=5';
 let lib,aligner,loadedDtype,transcriber,loadedWhisper,cache;
 const tell=(type,rest={})=>self.postMessage({type,...rest});
 const progress=p=>{if(p.status==='progress')tell('progress',{value:p.progress,label:p.file});};
 async function library(){if(!lib){lib=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1');lib.env.allowLocalModels=false;lib.env.backends.onnx.wasm.numThreads=1;}return lib;}
 async function align(data){
   const target=buildTarget(data.text),duration=data.samples.length/16000;
+  if (!target.tokens.length) {
+    const lines = roughTiming(data.text, duration).map(line => ({...line, review:true}));
+    return {lines, review:lines.map((_, i) => i), method:'estimated'};
+  }
   if(duration>1200)throw Error('Точный режим рассчитан на фрагменты до 20 минут.');
   const {pipeline}=await library(),dtype=data.dtype==='fp32'?'fp32':'q8';
   // Keeping Whisper and XLSR resident together wastes gigabytes on small devices.
@@ -16,7 +21,7 @@ async function align(data){
     cache={key,...await extractEmissions(aligner,data.samples,update=>tell('phase',update))};
   }else tell('phase',{value:85,message:'Акустика уже рассчитана. Уточняю по вашему тексту…'});
   const spans=forceAlign(cache.emissions,cache.vocabSize,target.tokens,{times:cache.times,windows:lineWindows(target,data.anchors,duration),onProgress:p=>tell('phase',{value:85+p*15,message:`Выравниваю буквы и слоги: ${Math.round(p*100)}%`})});
-  return timelineFromAlignment(target,spans,duration);
+  return timelineFromAlignment(target,spans,duration,{voice:vocalBoundaries(data.samples),anchors:data.anchors});
 }
 async function transcribe(data){
   const {pipeline}=await library();if(aligner){await aligner.dispose();aligner=null;cache=null;}

@@ -14,7 +14,12 @@ function fixture(ids,{vocab=5,lead=4,tail=4,stretch=3}={}){const frames=[...Arra
  const spans=forceAlign(emissions,39,ids),result=timelineFromAlignment(target,spans,10);validateTimeline(result.lines,10);
  assert.equal(result.lines[0].text,'Наша песня');assert.equal(result.lines[0].words[0].units.length,2);assert.ok(result.lines[1].start>result.lines[0].end);
  const anchors=result.lines.map(l=>({start:l.start,end:l.end}));const windows=lineWindows(target,anchors,10);const fixed=forceAlign(emissions,39,ids,{windows});assert.equal(fixed[0].start,spans[0].start);
- assert.throws(()=>buildTarget('2026 год'),/числа словами/);assert.throws(()=>buildTarget('Hello'),/русский/);
+ const mixed=buildTarget('— Hello! 2026, год.');
+ assert.equal(mixed.lines[0].text,'— Hello! 2026, год.');
+ const mixedFixture=fixture(mixed.tokens.map(t=>t.id),{vocab:39});
+ const mixedResult=timelineFromAlignment(mixed,forceAlign(mixedFixture.emissions,39,mixed.tokens),10);
+ assert.deepEqual(mixedResult.review,[0]);
+ validateTimeline(mixedResult.lines,10);
  assert.equal(RU_VOCAB['я'],38);assert.equal(RU_VOCAB['о'],21);
 }
 // A sustained vowel is not forced to occupy the same fraction as a short vowel.

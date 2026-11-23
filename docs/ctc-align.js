@@ -1,37 +1,47 @@
-import {parseLyrics,syllables} from './engine.js';
+import {parseLyrics,syllables} from './engine.js?v=5';
 
 // Russian XLSR-53 CTC vocabulary, from the model's public vocab.json.
 export const RU_VOCAB={'<pad>':0,'<s>':1,'</s>':2,'<unk>':3,'|':4,'-':5,'ё':6,...Object.fromEntries(Array.from('абвгдежзийклмнопрстуфхцчшщъыьэюя').map((c,i)=>[c,i+7]))};
 export const ACOUSTIC_MODEL='onnx-community/wav2vec2-large-xlsr-53-russian-ONNX';
-const letter=c=>c.toLowerCase().replace('ё','е');
+const vowels = /[аеёиоуыэюя]/u;
+const latin = {a:'а',b:'б',c:'к',d:'д',e:'е',f:'ф',g:'г',h:'х',i:'и',j:'дж',k:'к',l:'л',m:'м',n:'н',o:'о',p:'п',q:'к',r:'р',s:'с',t:'т',u:'у',v:'в',w:'в',x:'кс',y:'й',z:'з'};
+const english = {hello:'хэллоу', love:'лав', you:'ю', the:'зэ', i:'ай', baby:'бэйби', yeah:'йе', forever:'форэвер'};
+const digraphs = {sh:'ш',ch:'ч',th:'з',ph:'ф',oo:'у',ee:'и',qu:'кв',ck:'к'};
 
-export function buildTarget(text,vocab=RU_VOCAB){
-  const tokens=[],lines=[];let wordCount=0;
-  for(const [li,line]of parseLyrics(text).entries()){
-    const words=[];
-    for(const raw of line.text.split(/\s+/).filter(Boolean)){
-      const wi=words.length,units=syllables(raw).map(t=>({text:t,start:0,end:0}));
-      const word={text:raw.replaceAll('|',''),start:0,end:0,units};
-      const before=tokens.length;
-      for(const [ui,u]of units.entries())for(const c of Array.from(u.text)){
-        if(!/\p{L}/u.test(c)){
-          if(/\p{N}/u.test(c))throw Error('Запишите числа словами: «'+raw+'». Так модель сможет найти их в вокале.');
-          continue;
+function acousticLetters(text) {
+  const lower = text.toLowerCase();
+  return lower.replace(/[a-z]+/g, word => english[word] ??
+    word.replace(/sh|ch|th|ph|oo|ee|qu|ck|[a-z]/g, part => digraphs[part] ?? latin[part]));
+}
+
+export function buildTarget(text, vocab = RU_VOCAB) {
+  const lines = parseLyrics(text).map(line => {
+    const words = line.text.split(/\s+/).map(raw => {
+      const units = syllables(raw).map(text => ({text, start:0, end:0}));
+      return {text:units.map(unit => unit.text).join(''), start:0, end:0, units};
+    }).filter(word => word.units.length);
+    return {text:words.map(word => word.text).join(' '), start:0, end:0, words};
+  }).filter(line => line.words.length);
+  const tokens = [];
+  for (const [li, line] of lines.entries()) {
+    for (const [wi, word] of line.words.entries()) {
+      const start = tokens.length;
+      for (const [ui, unit] of word.units.entries()) {
+        const spelling = acousticLetters(unit.text).replace(/[^а-яё]/gu, '');
+        const letters = spelling.replace(/([аеёиоуыэюя])\1+/gu, '$1');
+        for (const char of letters) {
+          const id = vocab[char] ?? vocab[char.replace('ё','е')];
+          if (id !== undefined) tokens.push({id, li, wi, ui, char});
         }
-        const id=vocab[letter(c)];
-        if(id===undefined)throw Error('Точный режим сейчас поддерживает русский текст. Неизвестный символ: «'+c+'».');
-        tokens.push({id,li,wi,ui,char:c});
+        unit.estimated = (!letters && /[\p{L}\p{N}]/u.test(unit.text)) || /[a-z]/i.test(unit.text);
+        unit.sustained = letters.length < spelling.length;
       }
-      if(tokens.length===before)throw Error('В строке есть слово без русских букв: «'+raw+'». Удалите служебные отметки.');
-      // Units consisting only of punctuation cannot receive an acoustic boundary.
-      if(units.some((_,ui)=>!tokens.slice(before).some(t=>t.ui===ui)))throw Error('Некорректное деление на слоги в слове «'+raw+'».');
-      tokens.push({id:vocab['|'],li,wi,ui:-1,char:' '});words.push(word);wordCount++;
+      if (tokens.length > start) tokens.push({id:vocab['|'], li, wi, ui:-1, char:' '});
     }
-    lines.push({text:words.map(w=>w.text).join(' '),start:0,end:0,words});
   }
-  if(!wordCount)throw Error('Добавьте текст песни.');
-  tokens.pop();
-  return {tokens,lines};
+  if (!lines.length) throw Error('Добавьте текст песни.');
+  if (tokens.length) tokens.pop();
+  return {tokens, lines};
 }
 
 export function logSoftmaxFrames(logits,vocabSize){
@@ -75,29 +85,79 @@ export function forceAlign(emissions,vocabSize,target,{blank=0,times=null,frameS
   return spans.map(s=>({start:s.start,end:s.end,score:Math.exp(s.sum/Math.max(1,s.count)),peak:Math.exp(s.peak)}));
 }
 
-export function timelineFromAlignment(target,spans,duration){
-  const lines=structuredClone(target.lines),groups=new Map();
-  target.tokens.forEach((token,i)=>{if(token.ui<0)return;const key=`${token.li}:${token.wi}:${token.ui}`;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(spans[i]);});
-  const review=[];
-  for(const [li,line]of lines.entries()){
-    for(const [wi,word]of line.words.entries()){
-      const scores=[];
-      for(const [ui,unit]of word.units.entries()){
-        const chars=groups.get(`${li}:${wi}:${ui}`);
-        unit.start=Math.max(0,chars[0].start);unit.end=Math.min(duration,chars.at(-1).end);
-        unit.score=chars.reduce((s,c)=>s+c.peak,0)/chars.length;scores.push(...chars.map(c=>c.peak));
-      }
-      // Carry the highlight through the measured gap up to the next syllable,
-      // rather than allocating equal fractions of the word's total duration.
-      for(let ui=0;ui<word.units.length-1;ui++)word.units[ui].end=word.units[ui+1].start;
-      word.start=word.units[0].start;word.end=word.units.at(-1).end;
-      word.score=scores.reduce((s,p)=>s+p,0)/scores.length;
-      word.review=word.score<.35||word.units.some(u=>u.end-u.start<.035)||word.end-word.start>4;
+export function timelineFromAlignment(target, spans, duration, {voice, anchors} = {}) {
+  const lines = structuredClone(target.lines);
+  const groups = new Map();
+  target.tokens.forEach((token, index) => {
+    if (token.ui < 0) return;
+    const unit = lines[token.li].words[token.wi].units[token.ui];
+    if (!groups.has(unit)) groups.set(unit, []);
+    groups.get(unit).push({...spans[index], char:token.char});
+  });
+  const units = lines.flatMap((line, li) => line.words.flatMap(word =>
+    word.units.map(unit => ({unit, li, chars:groups.get(unit)}))));
+  let previousEnd = 0;
+  for (const [index, entry] of units.entries()) {
+    if (!entry.chars) continue;
+    const {unit, chars, li} = entry;
+    const first = chars[0], last = chars.at(-1);
+    let nextIndex = index + 1;
+    while (nextIndex < units.length && !units[nextIndex].chars) nextIndex++;
+    const nextStart = units[nextIndex]?.chars[0].start ?? duration;
+    const anchor = anchors?.[li];
+    const min = Math.min(first.start, Math.max(previousEnd, anchor?.start ?? 0));
+    const max = Math.max(last.end, Math.min(nextStart, duration, anchor?.end ?? duration));
+    const reach = unit.sustained || (chars.length === 1 && vowels.test(first.char)) ? 8 : .24;
+    unit.start = Math.max(previousEnd, first.start);
+    unit.end = Math.min(max, last.end);
+    if (voice && vowels.test(first.char)) {
+      unit.start = voice.edge(first, -1, Math.max(min, first.start - reach));
     }
-    line.start=line.words[0].start;line.end=line.words.at(-1).end;line.score=line.words.reduce((s,w)=>s+w.score,0)/line.words.length;
-    line.review=line.words.some(w=>w.review);if(line.review)review.push(li);
+    if (voice && vowels.test(last.char)) {
+      unit.end = voice.edge(last, 1, Math.min(max, last.end + reach));
+    }
+    unit.start = Math.min(duration, Math.max(previousEnd, unit.start));
+    unit.end = Math.min(duration, max, Math.max(unit.start, unit.end));
+    previousEnd = unit.end;
+    unit.score = chars.reduce((sum, char) => sum + char.peak, 0) / chars.length;
   }
-  return {lines,review,method:'ctc-russian',frameStep:.02};
+  // Preserve punctuation and unmodelled writing in the displayed lyric. Only
+  // spoken content without a match takes a share of the available gap.
+  let cursor = 0;
+  while (cursor < units.length) {
+    if (units[cursor].chars) { cursor++; continue; }
+    const from = cursor;
+    while (cursor < units.length && !units[cursor].chars) cursor++;
+    let at = from ? units[from - 1].unit.end : 0;
+    const limit = units[cursor]?.unit.start ?? duration;
+    const run = units.slice(from, cursor);
+    const count = run.filter(({unit}) => unit.estimated).length;
+    const step = count ? Math.max(0, limit - at) / count : 0;
+    for (const {unit} of run) {
+      const punctuationAt = !count && units[cursor]?.li === run[0].li &&
+        units[from - 1]?.li !== run[0].li ? limit : at;
+      unit.start = punctuationAt;
+      if (unit.estimated) at += step;
+      unit.end = unit.estimated ? Math.min(limit, at) : punctuationAt;
+    }
+  }
+  const review = [];
+  for (const [li, line] of lines.entries()) {
+    for (const word of line.words) {
+      const scored = word.units.filter(unit => unit.score !== undefined);
+      word.start = word.units[0].start;
+      word.end = word.units.at(-1).end;
+      word.score = scored.reduce((sum, unit) => sum + unit.score, 0) / (scored.length || 1);
+      word.review = word.units.some(unit => unit.estimated ||
+        (unit.score !== undefined && (unit.score < .35 || unit.end - unit.start < .035)));
+    }
+    line.start = line.words[0].start;
+    line.end = line.words.at(-1).end;
+    line.score = line.words.reduce((sum, word) => sum + word.score, 0) / line.words.length;
+    line.review = line.words.some(word => word.review);
+    if (line.review) review.push(li);
+  }
+  return {lines, review, method:'ctc-russian', frameStep:.02};
 }
 
 export function lineWindows(target,anchors,duration){

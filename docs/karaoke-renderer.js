@@ -60,7 +60,9 @@ export function highlightWidth(ctx, line, time) {
     const word = words[wi];
     for (const unit of word.units ?? []) {
       const advance = ctx.measureText(prefix + unit.text).width - ctx.measureText(prefix).width;
-      const fraction = Math.min(1, Math.max(0, (time - unit.start) / Math.max(.001, unit.end - unit.start)));
+      const fraction = unit.start === unit.end
+        ? Number(time >= unit.start)
+        : Math.min(1, Math.max(0, (time - unit.start) / (unit.end - unit.start)));
       width += advance * fraction;
       prefix += unit.text;
       if (time < unit.end) return Math.max(0, width);
